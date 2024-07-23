@@ -1,6 +1,7 @@
 package main
 
 import (
+    "bytes"
     "context"
     "io"
     "time"
@@ -11,7 +12,7 @@ type dribbleWriter struct {
     writer        io.Writer
     writeReceiver <-chan io.Writer
     nextWriter    chan io.Writer
-    buf           []byte
+    buf           bytes.Buffer
 }
 
 func newDribbleWriter(ctx context.Context, writer io.Writer) *dribbleWriter {
@@ -58,8 +59,8 @@ func (w *dribbleWriter) tryGetWriterOrWait() (io.Writer, error) {
         return nil, w.ctx.Err()
     }
     if w.writer != nil {
-        _, err := w.writer.Write(w.buf)
-        w.buf = nil
+        _, err := io.Copy(w.writer, &w.buf)
+        w.buf = bytes.Buffer{}
         if err != nil {
             return nil, err
         }
@@ -75,23 +76,20 @@ func (w *dribbleWriter) Write(p []byte) (int, error) {
     if writer != nil {
         return w.writer.Write(p)
     }
-    w.buf = append(w.buf, p...)
-    return len(p), nil
+    return w.buf.Write(p)
 }
 
 func (w *dribbleWriter) ReadFrom(r io.Reader) (n int64, err error) {
-    buf := make([]byte, 64*1024)
     for {
         writer, err := w.tryGetWriterOrWait()
         if err != nil {
             return n, err
         }
         if writer != nil {
-            rest, err := io.CopyBuffer(writer, r, buf)
+            rest, err := io.Copy(writer, r)
             return n + rest, err
         }
-        readN, err := r.Read(buf[:4*1024])
-        w.buf = append(w.buf, buf[:readN]...)
-        n += int64(readN)
+        readN, err := io.CopyN(&w.buf, r, 4*1024)
+        n += readN
     }
 }
