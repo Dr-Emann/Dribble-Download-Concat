@@ -44,12 +44,9 @@ func (w *dribbleWriter) Close() error {
     return nil
 }
 
-func (w *dribbleWriter) Write(p []byte) (int, error) {
+func (w *dribbleWriter) tryGetWriterOrWait() (io.Writer, error) {
     if w.writer != nil {
-        if w.ctx.Err() != nil {
-            return 0, w.ctx.Err()
-        }
-        return w.writer.Write(p)
+        return w.writer, nil
     }
     timer := time.NewTimer(5 * time.Second)
     defer timer.Stop()
@@ -58,15 +55,43 @@ func (w *dribbleWriter) Write(p []byte) (int, error) {
     case w.writer = <-w.writeReceiver:
     case _ = <-timer.C:
     case _ = <-w.ctx.Done():
-        return 0, w.ctx.Err()
+        return nil, w.ctx.Err()
     }
     if w.writer != nil {
         _, err := w.writer.Write(w.buf)
+        w.buf = nil
         if err != nil {
-            return 0, err
+            return nil, err
         }
+    }
+    return w.writer, nil
+}
+
+func (w *dribbleWriter) Write(p []byte) (int, error) {
+    writer, err := w.tryGetWriterOrWait()
+    if err != nil {
+        return 0, err
+    }
+    if writer != nil {
         return w.writer.Write(p)
     }
     w.buf = append(w.buf, p...)
     return len(p), nil
+}
+
+func (w *dribbleWriter) ReadFrom(r io.Reader) (n int64, err error) {
+    buf := make([]byte, 64*1024)
+    for {
+        writer, err := w.tryGetWriterOrWait()
+        if err != nil {
+            return n, err
+        }
+        if writer != nil {
+            rest, err := io.CopyBuffer(writer, r, buf)
+            return n + rest, err
+        }
+        readN, err := r.Read(buf[:4*1024])
+        w.buf = append(w.buf, buf[:readN]...)
+        n += int64(readN)
+    }
 }
